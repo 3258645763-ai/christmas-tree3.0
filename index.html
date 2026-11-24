@@ -1,0 +1,279 @@
+	<!DOCTYPE html>
+	<html lang="zh-CN">
+	<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+	<title>圣诞树 · Merry Christmas</title>
+	<link rel="preconnect" href="https://fonts.googleapis.com">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link href="https://fonts.googleapis.com/css2?family=Great+Vibes&display=swap" rel="stylesheet">
+	<style>
+	  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
+	  #scene {
+	    position: fixed; inset: 0; width: 100vw; height: 100vh; display: block;
+	    touch-action: none; cursor: grab;
+	  }
+	  #scene.dragging { cursor: grabbing; }
+	</style>
+	</head>
+	<body>
+	<canvas id="scene"></canvas>
+	<script>
+	(() => {
+	  'use strict';
+	  /* ================= 全局参数（与 Python 版一一对应） ================= */
+	  const TAU = Math.PI * 2;
+	  const TREE_POINTS   = 50000;
+	  const GROUND_POINTS = 4000;
+	  const STAR_POINTS   = 1200;
+	  const HEART_POINTS  = 1000;
+	  const SNOW_COUNT    = 10;
+	  const N = TREE_POINTS + GROUND_POINTS + STAR_POINTS + HEART_POINTS; // 56200
+	  const CAM_DIST   = 13;      // 相机前后距离
+	  const CAM_HEIGHT = 6;       // 相机高度
+	  const PITCH      = -0.25;   // 负角度 = 俯视
+	  const TREE_HEIGHT = 12.0;
+	  const BASE_SPIN   = 0.27;   // rad/s，等价原版 0.0045/帧 @60fps，且与帧率解耦
+	  const cv  = document.getElementById('scene');
+	  const ctx = cv.getContext('2d', { alpha: false, desynchronized: true });
+	  const DPR = Math.min(window.devicePixelRatio || 1, 1.5); // 限制像素比保性能
+	  /* ================= 粒子数据（TypedArray，启动生成一次） ================= */
+	  const px = new Float32Array(N), py = new Float32Array(N), pz = new Float32Array(N);
+	  const col32 = new Uint32Array(N);   // 小端字节序下的 ABGR 打包色
+	  let n = 0;
+	  const irand = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+	  const urand = (a, b) => a + Math.random() * (b - a);
+	  const gauss = () => {               // Box-Muller 标准正态
+	    let u = 0, v = 0;
+	    while (u === 0) u = Math.random();
+	    while (v === 0) v = Math.random();
+	    return Math.sqrt(-2 * Math.log(u)) * Math.cos(TAU * v);
+	  };
+	  function add(x, y, z, r, g, b) {
+	    px[n] = x; py[n] = y; pz[n] = z;
+	    col32[n] = 0xFF000000 | (b << 16) | (g << 8) | r;
+	    n++;
+	  }
+	  /* ---------- 圣诞树：70% 螺旋灯带 + 30% 蓬松填充 ---------- */
+	  function genTree() {
+	    const loops = 9;
+	    const spiralN = Math.floor(TREE_POINTS * 0.7);
+	    for (let i = 0; i < spiralN; i++) {
+	      const u = Math.random();
+	      const h = Math.pow(u, 1.6);                  // 底密顶疏
+	      const y = TREE_HEIGHT * h + 0.2;
+	      let baseR = Math.pow(1 - h, 1.1) * 3.2;
+	      const wave = Math.max(0, Math.sin((h * 5.8 + 0.15) * TAU));
+	      baseR *= 1 + 0.65 * wave;                    // 树枝层次
+	      const ang = u * loops * TAU + urand(-0.22, 0.22);
+	      const r = baseR * urand(0.85, 1.08);
+	      const x = Math.cos(ang) * r, z = Math.sin(ang) * r;
+	      const mid = Math.max(0.15, 1 - Math.abs(h - 0.55) * 1.5); // 中段更亮
+	      let g = Math.min(255, 155 + Math.floor(90 * mid) + irand(-15, 20));
+	      let b = Math.min(255, 185 + Math.floor(70 * mid) + irand(-15, 35));
+	      if (Math.random() < 0.08) {                  // 8% 概率点亮小彩灯
+	        g = 255 - irand(0, 35);
+	        b = Math.min(255, 230 + irand(0, 25));
+	      }
+	      add(x, y, z, 255, g, b);
+	    }
+	    const fillN = TREE_POINTS - spiralN;
+	    for (let i = 0; i < fillN; i++) {
+	      const h = Math.pow(Math.random(), 1.9);
+	      const y = TREE_HEIGHT * h + 0.2 + urand(-0.08, 0.08);
+	      let baseR = Math.pow(1 - h, 1.1) * 4.3;
+	      const wave = Math.max(0, Math.sin((h * 5.8 + 0.15) * TAU));
+	      baseR *= 1 + 0.65 * wave;
+	      const r = baseR * Math.sqrt(Math.random());
+	      const ang = Math.random() * TAU;
+	      const x = Math.cos(ang) * r + urand(-0.08, 0.08);
+	      const z = Math.sin(ang) * r + urand(-0.08, 0.08);
+	      add(x, y, z, 255, irand(165, 225), irand(190, 250));
+	    }
+	  }
+	  /* ---------- 地面光环（法阵环，高斯散布） ---------- */
+	  function genGround() {
+	    const rings = [4.6, 6.0, 7.4, 8.8, 10.2, 11.4];
+	    for (let i = 0; i < GROUND_POINTS; i++) {
+	      const ring = rings[(Math.random() * rings.length) | 0];
+	      const r = gauss() * 0.3 + ring;
+	      const th = Math.random() * TAU;
+	      const c = Math.random() < 0.15 ? irand(235, 255) : irand(190, 235);
+	      add(Math.cos(th) * r, -0.25, Math.sin(th) * r, c, c, 255);
+	    }
+	  }
+	  /* ---------- 空中星星（随场景旋转） ---------- */
+	  function genStars() {
+	    for (let i = 0; i < STAR_POINTS; i++) {
+	      const base = irand(215, 255);
+	      add(urand(-18, 18), urand(3, 18), urand(-18, 18), base, base, 255);
+	    }
+	  }
+	  /* ---------- 树顶 3D 心形（隐式方程拒绝采样） ---------- */
+	  function genHeart() {
+	    const scale = 0.9, topY = TREE_HEIGHT + 0.05;
+	    let count = 0;
+	    while (count < HEART_POINTS) {
+	      const x = urand(-1.3, 1.3), y = urand(-1.4, 1.4);
+	      const f = Math.pow(x * x + y * y - 1, 3) - x * x * y * y * y;
+	      if (f <= 0) {
+	        const factor = Math.max(0.35, 1.15 - 0.5 * Math.hypot(x, y));
+	        const g = Math.max(120, Math.min(255, Math.floor(130 * factor + 80)));
+	        const b = Math.max(120, Math.min(255, Math.floor(190 * factor + 70)));
+	        add(x * scale * 0.8, topY + (y + 1) * scale * 0.5, urand(-0.18, 0.18), 255, g, b);
+	        count++;
+	      }
+	    }
+	  }
+	  genTree(); genGround(); genStars(); genHeart();
+	  /* ================= 前景大雪花 ================= */
+	  let flakes = [];
+	  function spawnFlake() {
+	    const r = urand(10, 16) * DPR;
+	    const v = urand(30, 45) * DPR;
+	    const y = -urand(10, 80) * DPR;
+	    const life = (H + 80 * DPR - y) / v;
+	    return { x: Math.random() * W, y, r, v, life, maxLife: life };
+	  }
+	  function initSnow() { flakes = Array.from({ length: SNOW_COUNT }, spawnFlake); }
+	  /* ================= 尺寸 / 辉光缓冲 ================= */
+	  let W, H, FOV, imgData, buf32;
+	  let g2cv, g2x, g4cv, g4x, g8cv, g8x;
+	  function mkGlow() {
+	    const mk = (div) => {
+	      const c = document.createElement('canvas');
+	      c.width = Math.max(1, W >> div); c.height = Math.max(1, H >> div);
+	      return [c, c.getContext('2d')];
+	    };
+	    [g2cv, g2x] = mk(1);
+	    [g4cv, g4x] = mk(2);
+	    [g8cv, g8x] = mk(3);
+	  }
+	  function resize() {
+	    W = Math.max(2, Math.round(innerWidth * DPR));
+	    H = Math.max(2, Math.round(innerHeight * DPR));
+	    cv.width = W; cv.height = H;
+	    FOV = Math.min(H * 0.63, W * 1.1);   // 竖屏手机防树溢出屏幕
+	    imgData = ctx.createImageData(W, H);
+	    buf32 = new Uint32Array(imgData.data.buffer);
+	    buf32.fill(0xFF000000);
+	    mkGlow();
+	    initSnow();
+	  }
+	  /* ================= 核心：向量化思路的逐点投影 + 像素批量写入 ================= */
+	  const CP = Math.cos(PITCH), SP = Math.sin(PITCH);
+	  function stamp(ca, sa) {
+	    buf32.fill(0xFF000000);
+	    const w = W, h = H, halfW = w * 0.5, halfH = h * 0.5;
+	    for (let i = 0; i < N; i++) {
+	      const X = px[i], Y = py[i], Z = pz[i];
+	      const xz = X * ca - Z * sa;                 // yaw 旋转
+	      const zz = X * sa + Z * ca;
+	      const ypp = Y * CP - zz * SP - CAM_HEIGHT;  // pitch + 相机高度
+	      const zpp = Y * SP + zz * CP + CAM_DIST;    // 深度
+	      if (zpp <= 0.1) continue;                   // 视锥剔除
+	      const f = FOV / zpp;
+	      const sx = (halfW + xz * f) | 0;
+	      const sy = (halfH - ypp * f) | 0;
+	      if (sx < 0 || sx >= w || sy < 0 || sy >= h) continue;
+	      const c = col32[i];
+	      const idx = sy * w + sx;
+	      buf32[idx] = c;                             // 中心像素
+	      if (zpp < 12.31) {                          // size>=2 → 十字光斑
+	        if (sx > 0)      buf32[idx - 1] = c;
+	        if (sx < w - 1)  buf32[idx + 1] = c;
+	        if (sy > 0)      buf32[idx - w] = c;
+	        if (sy < h - 1)  buf32[idx + w] = c;
+	      }
+	      if (zpp < 4.62 && sx > 0 && sy > 0 && sx < w - 1 && sy < h - 1) {
+	        buf32[idx - w - 1] = c; buf32[idx - w + 1] = c;   // size>=3 → 补对角
+	        buf32[idx + w - 1] = c; buf32[idx + w + 1] = c;
+	      }
+	    }
+	  }
+	  /* ================= 三级辉光：降采样 → 平滑放大 → 加法叠加 ================= */
+	  function bloom() {
+	    g2x.drawImage(cv,   0, 0, g2cv.width, g2cv.height);
+	    g4x.drawImage(g2cv, 0, 0, g4cv.width, g4cv.height);
+	    g8x.drawImage(g4cv, 0, 0, g8cv.width, g8cv.height);
+	    ctx.globalCompositeOperation = 'lighter';
+	    ctx.globalAlpha = 0.16; ctx.drawImage(g2cv, 0, 0, W, H);   // 轻柔化
+	    ctx.globalAlpha = 0.32; ctx.drawImage(g4cv, 0, 0, W, H);   // 中光晕
+	    ctx.globalAlpha = 0.50; ctx.drawImage(g8cv, 0, 0, W, H);   // 大光晕
+	    ctx.globalAlpha = 1;
+	    ctx.globalCompositeOperation = 'source-over';
+	  }
+	  /* ================= 雪花（径向渐变柔光团） ================= */
+	  function drawSnow(dt) {
+	    ctx.globalCompositeOperation = 'lighter';
+	    for (const f of flakes) {
+	      f.y += f.v * dt;
+	      f.life -= dt;
+	      if (f.life <= 0 || f.y > H + 60 * DPR) { Object.assign(f, spawnFlake()); continue; }
+	      const phase = Math.max(0, Math.min(1, f.life / f.maxLife));
+	      const a = phase > 0.3 ? 1 : phase / 0.3;    // 生命末 30% 淡出
+	      const g = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, f.r * 1.3);
+	      g.addColorStop(0.0, `rgba(255,255,255,${(0.9 * a).toFixed(3)})`);
+	      g.addColorStop(0.3, `rgba(255,255,255,${(0.45 * a).toFixed(3)})`);
+	      g.addColorStop(1.0, 'rgba(255,255,255,0)');
+	      ctx.fillStyle = g;
+	      ctx.beginPath();
+	      ctx.arc(f.x, f.y, f.r * 1.3, 0, TAU);
+	      ctx.fill();
+	    }
+	    ctx.globalCompositeOperation = 'source-over';
+	  }
+	  /* ================= 文字（Great Vibes 手写体，对应原 Monotype Corsiva） ================= */
+	  function drawText() {
+	    const fs = Math.min(H * 0.085, W * 0.05, 92);
+	    const x = Math.max(30, W * 0.03);
+	    ctx.fillStyle = '#ffffff';
+	    ctx.shadowColor = 'rgba(190, 255, 210, 0.5)';
+	    ctx.shadowBlur = Math.max(10, fs * 0.25);
+	    ctx.font = `${fs}px "Great Vibes", "Segoe Script", cursive`;
+	    ctx.fillText('Merry Christmas', x, H / 3);
+	    ctx.shadowBlur = 8;
+	    ctx.font = `${fs * 0.6}px "Great Vibes", "Segoe Script", cursive`;
+	    ctx.fillText('647', x, H / 3 + fs * 0.9);   // 署名文字，可在源码中修改
+	    ctx.shadowBlur = 0;
+	  }
+	  /* ================= 交互：拖拽推树转（松手带惯性） ================= */
+	  let angle = 0, spin = 0, dragging = false, lastX = 0;
+	  cv.addEventListener('pointerdown', e => {
+	    dragging = true; lastX = e.clientX;
+	    cv.classList.add('dragging');
+	    cv.setPointerCapture(e.pointerId);
+	  });
+	  cv.addEventListener('pointermove', e => {
+	    if (!dragging) return;
+	    const dx = e.clientX - lastX; lastX = e.clientX;
+	    angle += dx * 0.006;
+	    spin = dx * 0.36;                            // 估计瞬时角速度，松手后惯性
+	  });
+	  const endDrag = () => { dragging = false; cv.classList.remove('dragging'); };
+	  cv.addEventListener('pointerup', endDrag);
+	  cv.addEventListener('pointercancel', endDrag);
+	  /* ================= 主循环 ================= */
+	  let last = performance.now();
+	  function frame(now) {
+	    requestAnimationFrame(frame);
+	    const dt = Math.min((now - last) / 1000, 0.05);
+	    last = now;
+	    if (!dragging) {
+	      angle += (BASE_SPIN + spin) * dt;
+	      spin *= Math.exp(-2.2 * dt);               // 惯性衰减回基础自转
+	    }
+	    stamp(Math.cos(angle), Math.sin(angle));     // 粒子层
+	    ctx.putImageData(imgData, 0, 0);
+	    bloom();                                     // 辉光层
+	    drawText();                                  // 文字
+	    drawSnow(dt);                                // 前景雪花（最上层）
+	  }
+	  if (document.fonts) document.fonts.load('80px "Great Vibes"');
+	  addEventListener('resize', resize);
+	  resize();
+	  requestAnimationFrame(frame);
+	})();
+	</script>
+	</body>
+	</html>
